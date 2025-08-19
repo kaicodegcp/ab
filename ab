@@ -6,3 +6,13 @@ for repo in $(curl -s -u eap_dev:cGz6h7jH3QUprnq2K7gwh3fp9 \
       https://docker-3rdparty-int-local.artifactrepository.citigroup.net/v2/$repo/tags/list \
       | jq -r '.tags[]?'
 done
+
+
+for repo in $(curl -s -u eap_dev:cGz6h7jH3QUprnq2K7gwh3fp9 \
+  https://docker-3rdparty-int-local.artifactrepository.citigroup.net/v2/cds-ds-hii-165345/_catalog \
+  | jq -r '.repositories[]'); do
+    echo "Repository: $repo"
+    curl -s -u eap_dev:cGz6h7jH3QUprnq2K7gwh3fp9 \
+      https://docker-3rdparty-int-local.artifactrepository.citigroup.net/v2/$repo/tags/list \
+      | jq -r '.tags[]?'
+done
