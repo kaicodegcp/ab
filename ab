@@ -1,15 +1,4 @@
-HOST="docker-3rdparty-int-local.artifactrepository.citigroup.net"
-AUTH="eap_dev:cGz6h7jH3QUprnq2K7gwh3fp9"
-PREFIX="cds-ds-hii-165345/"
-
-curl -s -u "$AUTH" "https://$HOST/v2/_catalog?n=10000" \
-| jq -r --arg p "$PREFIX" '.repositories[] | select(startswith($p))' \
-| while read -r repo; do
-    # Get tags for each real repo under your prefix
-    tags=$(curl -s -u "$AUTH" "https://$HOST/v2/$repo/tags/list" | jq -r '.tags[]?' )
-    # Skip repos with no tags
-    [ -z "$tags" ] && continue
-    for t in $tags; do
-        echo "$HOST/$repo:$t"
-    done
-  done
+repo="cds-ds-hii-165345/cdp-private"
+curl -s -u eap_dev:cGz6h7jH3QUprnq2K7gwh3fp9 \
+  https://docker-3rdparty-int-local.artifactrepository.citigroup.net/v2/$repo/tags/list \
+  | jq -r --arg repo "$repo" '.tags[]? | "docker-3rdparty-int-local.artifactrepository.citigroup.net/\($repo):\(. )"'
