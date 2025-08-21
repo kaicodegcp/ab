@@ -1,7 +1,396 @@
-DEVLIST="/dev/sdb,/dev/sdc,/dev/sdd,/dev/sde,/dev/sdf,/dev/sdg,/dev/sdh,/dev/sdi,/dev/sdj,/dev/sdk,/dev/sdl,/dev/sdm"
-sudo ./cleanup.sh --extra-devices "$DEVLIST" --really-wipe --yes-i-am-sure --keep-fstab
+emails a report (mail -s) to the operator address you pass in
 
-mount | grep '^/data/'            # no output
-grep -E '\s/data/' /etc/fstab     # no output
-lsblk -f | egrep '^sd[b-m]'       # FSTYPE should be blank on wiped disks
+1) Playbook
 
+cti_rhel_eapbigdata_bdeng_vm_ozone_cleanup.yml
+
+- name: Ozone filesystem cleanup (all host types)
+  hosts: all
+  become: true
+  gather_facts: true
+  vars_files:
+    - vars/ozone_cleanup.yml
+  tasks:
+    - name: Run ozone cleanup
+      include_role:
+        name: ozone_cleanup
+
+2) Vars (edit defaults as you like)
+
+vars/ozone_cleanup.yml
+
+# Tag used in /etc/fstab lines managed by your FS playbooks
+cleanup_fstab_tag: "ansible:ozone-managed"
+
+# Candidate discovery
+cleanup_use_patterns: true     # include known Ozone/Cloudera paths + /data/*
+cleanup_extra_devices: ""      # CSV list of extra devices (optional). ex: "/dev/sdb,/dev/sdc"
+
+# Wipe behavior (DOUBLE CONFIRMATION)
+cleanup_really_wipe: false     # set true to allow wiping
+cleanup_wipe_confirm: ""       # must be exactly "WIPE" to proceed with --really-wipe
+
+# fstab editing
+cleanup_keep_fstab: false      # set true to leave /etc/fstab untouched
+
+# Email
+cleanup_email_to: "someone@example.com"   # REQUIRED at run time (or override with -e)
+cleanup_email_subject_prefix: "[Ozone Cleanup]"
+
+# Log file location
+cleanup_log_dir: "/var/log"
+
+3) Role layout
+roles/ozone_cleanup/
+├─ tasks/main.yml
+└─ templates/ozone_cleanup.sh.j2
+
+3a) roles/ozone_cleanup/tasks/main.yml
+---
+- name: Ensure prereqs present (gdisk, util-linux tools, mailx)
+  package:
+    name:
+      - gdisk
+      - util-linux
+      - mailx
+    state: present
+
+- name: Create log dir
+  file:
+    path: "{{ cleanup_log_dir }}"
+    state: directory
+    mode: '0755'
+
+- name: Deploy cleanup script
+  template:
+    src: ozone_cleanup.sh.j2
+    dest: /usr/local/sbin/ozone_cleanup.sh
+    mode: '0755'
+
+# Build CLI args for the script
+- name: Compose script arguments
+  set_fact:
+    _cleanup_args: >-
+      {{ '--patterns' if cleanup_use_patterns else '' }}
+      {{ '--tag ' ~ cleanup_fstab_tag if cleanup_fstab_tag|length > 0 else '' }}
+      {{ '--extra-devices ' ~ cleanup_extra_devices if cleanup_extra_devices|length > 0 else '' }}
+      {{ '--keep-fstab' if cleanup_keep_fstab else '' }}
+
+# Enforce double-confirmation for wipe
+- name: Validate wipe confirmations
+  assert:
+    that:
+      - (not cleanup_really_wipe) or (cleanup_wipe_confirm == 'WIPE')
+    fail_msg: >
+      Refusing to wipe: set both cleanup_really_wipe=true AND cleanup_wipe_confirm=WIPE
+      to allow destructive operations.
+    success_msg: "Confirmation satisfied or wipe disabled."
+
+- name: Add non-interactive wipe flags when double-confirmation satisfied
+  set_fact:
+    _cleanup_args: "{{ _cleanup_args ~ ' --really-wipe --yes-i-am-sure' }}"
+  when:
+    - cleanup_really_wipe | bool
+    - cleanup_wipe_confirm == "WIPE"
+
+- name: Compute log file path
+  set_fact:
+    _cleanup_log: "{{ cleanup_log_dir }}/ozone_cleanup_{{ inventory_hostname }}_{{ ansible_date_time.iso8601_basic }}.log"
+
+- name: Run cleanup script (output is also logged)
+  shell: |
+    set -o pipefail
+    /usr/local/sbin/ozone_cleanup.sh {{ _cleanup_args }} 2>&1 | tee "{{ _cleanup_log }}"
+  register: cleanup_run
+  changed_when: true
+
+# -------- Post-cleanup validations (captured for email) --------
+- name: Check mounts left under /data or ozone paths
+  shell: |
+    set -o pipefail
+    mount | egrep '^(/dev/.+ on )?(/data/|/var/app/lib/hadoop-ozone|/var/app/lib|/var/app/log|/opt/cloudera)'
+  register: chk_mounts
+  failed_when: false
+  changed_when: false
+
+- name: Check residual fstab lines
+  shell: |
+    set -o pipefail
+    grep -E '\s(/data/|/var/app/lib/hadoop-ozone|/var/app/lib|/var/app/log|/opt/cloudera)' /etc/fstab
+  register: chk_fstab
+  failed_when: false
+  changed_when: false
+
+- name: lsblk filesystem view for sd[b-z]
+  shell: |
+    lsblk -f | egrep '^sd[b-z]'
+  register: chk_lsblk
+  failed_when: false
+  changed_when: false
+
+- name: Check loop devices
+  shell: |
+    lsblk -dn -o NAME,TYPE | awk '$2=="loop"{print $0}'
+  register: chk_loops
+  failed_when: false
+  changed_when: false
+
+- name: Check LVM PVs on sd[b-z]
+  shell: |
+    pvs --noheadings -o pv_name | egrep 'sd[b-z]' || true
+  register: chk_pvs
+  failed_when: false
+  changed_when: false
+
+# -------- Email report --------
+- name: Build email subject
+  set_fact:
+    _subject: >-
+      {{ cleanup_email_subject_prefix }}
+      {{ inventory_hostname }} :
+      {{ 'SUCCESS' if cleanup_run.rc == 0 else 'COMPLETED-WITH-RC-' ~ cleanup_run.rc }}
+
+- name: Build email body (multi-section)
+  set_fact:
+    _body: |
+      Host: {{ inventory_hostname }}
+      Time: {{ ansible_date_time.iso8601 }}
+
+      Command:
+        /usr/local/sbin/ozone_cleanup.sh {{ _cleanup_args }}
+
+      Return code: {{ cleanup_run.rc }}
+      Log file   : {{ _cleanup_log }}
+
+      ---- Script Output (tail) ----
+      {{ (cleanup_run.stdout | default(''))[-4000:] }}
+
+      ---- Post-check: mounts ----
+      {{ chk_mounts.stdout | default('(none)') | trim }}
+
+      ---- Post-check: fstab ----
+      {{ chk_fstab.stdout | default('(none)') | trim }}
+
+      ---- Post-check: lsblk -f (sd[b-z]) ----
+      {{ chk_lsblk.stdout | default('(none)') | trim }}
+
+      ---- Post-check: loop devices ----
+      {{ chk_loops.stdout | default('(none)') | trim }}
+
+      ---- Post-check: LVM PVs ----
+      {{ chk_pvs.stdout | default('(none)') | trim }}
+
+- name: Send email report
+  shell: |
+    printf "%s\n" "{{ _body }}" | mail -s "{{ _subject }}" "{{ cleanup_email_to }}"
+  when: cleanup_email_to | length > 0
+  changed_when: false
+
+3b) roles/ozone_cleanup/templates/ozone_cleanup.sh.j2
+
+This is your improved shell script, updated to include /data by default, auto-fallback to /etc/fstab.bak when patterns yield nothing, and designed for non-interactive Ansible runs (the role passes --yes-i-am-sure only when you double-confirm).
+
+#!/usr/bin/env bash
+set -euo pipefail
+
+DRY_RUN=0
+TAG="{{ cleanup_fstab_tag }}"
+PATTERNS=0
+EXTRA_DEVICES=""
+KEEP_FSTAB=0
+REALLY_WIPE=0
+AUTO_CONFIRM=0
+
+log()  { printf "[%s] %s\n" "$(date +'%F %T')" "$*" >&2; }
+die()  { log "ERROR: $*"; exit 1; }
+run()  { if [[ $DRY_RUN -eq 1 ]]; then echo "DRY-RUN: $*"; else eval "$@"; fi; }
+
+usage() {
+  cat <<'USAGE'
+Ozone/Cloudera disk cleanup
+  --dry-run            : preview only
+  --tag <string>       : match /etc/fstab lines containing this tag/comment
+  --patterns           : include known paths: /var/app/lib/hadoop-ozone/*, /var/app/lib, /var/app/log, /opt/cloudera, /data/*
+  --extra-devices csv  : extra devices to wipe (CSV)
+  --keep-fstab         : do NOT edit /etc/fstab
+  --really-wipe        : perform destructive wipefs/sgdisk
+  --yes-i-am-sure      : skip interactive prompt (for automation)
+USAGE
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --dry-run) DRY_RUN=1 ;;
+    --tag) shift; TAG="${1:-}";;
+    --patterns) PATTERNS=1 ;;
+    --extra-devices) shift; EXTRA_DEVICES="${1:-}";;
+    --keep-fstab) KEEP_FSTAB=1 ;;
+    --really-wipe) REALLY_WIPE=1 ;;
+    --yes-i-am-sure) AUTO_CONFIRM=1 ;;
+    -h|--help) usage; exit 0;;
+    *) die "Unknown option: $1";;
+  esac
+  shift
+done
+
+[[ $EUID -eq 0 ]] || die "Run as root."
+command -v wipefs >/dev/null || die "wipefs not found (install util-linux)"
+command -v sgdisk >/dev/null || die "sgdisk not found (install gdisk)"
+command -v lsblk  >/dev/null || die "lsblk not found (install util-linux)"
+
+SAFE_MOUNTS_REGEX='^(/|/boot|/boot/efi|/usr|/var$|/home|/tmp|/run|/dev|/sys|/proc)(/|$)'
+# Note: /data included by default
+OZONE_PATHS_REGEX='^(/var/app/lib/hadoop-ozone|/var/app/lib|/var/app/log|/opt/cloudera|/data)'
+
+mapfile -t FSTAB_LINES < <(grep -vE '^\s*#' /etc/fstab | awk 'NF>=2{print $0}')
+CANDIDATE_MOUNTS=()
+CANDIDATE_DEVICES=()
+
+# From tag
+if [[ -n "$TAG" ]]; then
+  while IFS= read -r line; do
+    [[ "$line" == *"$TAG"* ]] || continue
+    dev=$(awk '{print $1}' <<< "$line")
+    mnt=$(awk '{print $2}' <<< "$line")
+    [[ "$mnt" =~ $SAFE_MOUNTS_REGEX ]] && continue
+    CANDIDATE_MOUNTS+=("$mnt")
+    CANDIDATE_DEVICES+=("$dev")
+  done < <(printf "%s\n" "${FSTAB_LINES[@]}")
+  log "Collected mounts from fstab tag '$TAG'."
+fi
+
+# From patterns (current mounts)
+if [[ $PATTERNS -eq 1 ]]; then
+  mapfile -t MOUNTED < <(mount | awk '{print $3}')
+  for m in "${MOUNTED[@]}"; do
+    [[ "$m" =~ $SAFE_MOUNTS_REGEX ]] && continue
+    [[ "$m" =~ $OZONE_PATHS_REGEX ]] || continue
+    CANDIDATE_MOUNTS+=("$m")
+    dev=$(mount | grep -E " on ${m//\//\\/} " | awk '{print $1}' | head -1)
+    [[ -n "$dev" ]] && CANDIDATE_DEVICES+=("$dev")
+  done
+fi
+
+# If patterns produced nothing (e.g., already unmounted), try /etc/fstab.bak for /data/… lines
+if [[ ${#CANDIDATE_DEVICES[@]} -eq 0 ]] && [[ -f /etc/fstab.bak ]]; then
+  mapfile -t BAK_DEVS < <(awk '!/^#/ && $2 ~ "^/data/" {print $1}' /etc/fstab.bak | sort -u)
+  if [[ ${#BAK_DEVS[@]} -gt 0 ]]; then
+    CANDIDATE_DEVICES+=("${BAK_DEVS[@]}")
+    log "Recovered devices from /etc/fstab.bak for /data/*"
+  fi
+fi
+
+# Extra devices
+if [[ -n "$EXTRA_DEVICES" ]]; then
+  IFS=',' read -r -a EXTRA_ARR <<< "$EXTRA_DEVICES"
+  CANDIDATE_DEVICES+=("${EXTRA_ARR[@]}")
+fi
+
+# Dedupe
+dedup() { awk '!seen[$0]++'; }
+CANDIDATE_MOUNTS=($(printf "%s\n" "${CANDIDATE_MOUNTS[@]}" | dedup))
+CANDIDATE_DEVICES=($(printf "%s\n" "${CANDIDATE_DEVICES[@]}" | dedup))
+
+log "Final candidates: ${#CANDIDATE_MOUNTS[@]} mounts, ${#CANDIDATE_DEVICES[@]} devices."
+
+# Unmount
+if ((${#CANDIDATE_MOUNTS[@]})); then
+  log "Unmounting candidate mount points..."
+  for m in $(printf "%s\n" "${CANDIDATE_MOUNTS[@]}" | awk '{print length, $0}' | sort -nr | cut -d' ' -f2-); do
+    if mountpoint -q -- "$m"; then
+      run "umount -fl -- '$m'" || true
+    fi
+  done
+fi
+
+# fstab cleanup
+if [[ $KEEP_FSTAB -eq 0 ]]; then
+  if [[ -n "$TAG" ]]; then
+    log "Removing /etc/fstab lines containing tag: $TAG"
+    run "sed -i.bak -e '/$TAG/d' /etc/fstab"
+  else
+    log "Removing /etc/fstab lines with Ozone/Cloudera or /data paths"
+    run "sed -i.bak -E '/\\s\\/var\\/app\\/lib\\/hadoop-ozone|\\s\\/var\\/app\\/log|\\s\\/var\\/app\\/lib|\\s\\/opt\\/cloudera|\\s\\/data\\//d' /etc/fstab"
+  fi
+fi
+
+# Protect system devices
+is_system_device() {
+  local d="$1"
+  local rootdev; rootdev=$(findmnt -n -o SOURCE / || true)
+  [[ -n "$rootdev" && "$d" == "$rootdev"* ]] && return 0
+  [[ "$d" =~ ^/dev/loop ]] && return 0
+  [[ "$d" =~ ^/dev/dm- ]] && return 0
+  [[ "$d" =~ ^/dev/mapper/ ]] && return 0
+  return 1
+}
+
+FILTERED_DEVICES=()
+for d in "${CANDIDATE_DEVICES[@]}"; do
+  if is_system_device "$d"; then
+    log "Skipping system/unknown device: $d"
+  else
+    FILTERED_DEVICES+=("$d")
+  fi
+done
+
+# Wipe
+if ((${#FILTERED_DEVICES[@]})); then
+  if [[ $REALLY_WIPE -eq 1 ]]; then
+    if [[ $AUTO_CONFIRM -ne 1 ]]; then
+      echo
+      echo "!!! DANGEROUS OPERATION !!!"
+      echo "About to WIPE devices:"
+      printf "  %s\n" "${FILTERED_DEVICES[@]}"
+      read -r -p "Type 'WIPE' to continue: " ans
+      [[ "$ans" == "WIPE" ]] || die "Aborted by user."
+    fi
+    log "Wiping devices with wipefs + sgdisk..."
+    for d in "${FILTERED_DEVICES[@]}"; do
+      run "wipefs -fa '$d' || true"
+      run "sgdisk --zap-all '$d' || true"
+      run "partprobe '$d' || true"
+    done
+  else
+    log "Skipping device wipe (no --really-wipe). Devices that WOULD be wiped:"
+    printf "  %s\n" "${FILTERED_DEVICES[@]}"
+  fi
+fi
+
+# Remove empty dirs
+if ((${#CANDIDATE_MOUNTS[@]})); then
+  log "Removing empty mount directories..."
+  for m in "${CANDIDATE_MOUNTS[@]}"; do
+    if [[ -d "$m" ]]; then
+      [[ -z "$(ls -A "$m" 2>/dev/null || true)" ]] && run "rmdir '$m' || true"
+    fi
+  done
+fi
+
+log "Cleanup complete."
+
+4) How to run (examples)
+
+Preview only
+
+ansible-playbook -i inventories/dev/hosts.ini \
+  cti_rhel_eapbigdata_bdeng_vm_ozone_cleanup.yml \
+  -e cleanup_email_to=you@company.com
+
+
+Real wipe with double confirmation
+
+ansible-playbook -i inventories/dev/hosts.ini \
+  cti_rhel_eapbigdata_bdeng_vm_ozone_cleanup.yml \
+  -e cleanup_really_wipe=true \
+  -e cleanup_wipe_confirm=WIPE \
+  -e cleanup_email_to=you@company.com
+
+
+Include extra devices explicitly
+
+ansible-playbook -i inventories/dev/hosts.ini \
+  cti_rhel_eapbigdata_bdeng_vm_ozone_cleanup.yml \
+  -e cleanup_really_wipe=true -e cleanup_wipe_confirm=WIPE \
+  -e cleanup_extra_devices="/dev/sdb,/dev/sdc" \
+  -e cleanup_email_to=you@company.com
