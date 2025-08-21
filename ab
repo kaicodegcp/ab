@@ -394,3 +394,132 @@ ansible-playbook -i inventories/dev/hosts.ini \
   -e cleanup_really_wipe=true -e cleanup_wipe_confirm=WIPE \
   -e cleanup_extra_devices="/dev/sdb,/dev/sdc" \
   -e cleanup_email_to=you@company.com
+
+
+
+1) metadata.json entry
+
+Paste this object into your repo’s metadata.json array:
+
+{
+  "file": "cti_rhel_eapbigdata_bdeng_vm_ozone_cleanup.yml",
+  "action": "Ozone Filesystem Cleanup (all host types)",
+  "params": [
+    {
+      "display-name": "Email To (report)",
+      "param-name": "cleanup_email_to",
+      "default-value": "",
+      "validation": false,
+      "required": true,
+      "hidden": false,
+      "field-type": "TEXT"
+    },
+    {
+      "display-name": "Allow Disk Wipe?",
+      "param-name": "cleanup_really_wipe",
+      "default-value": "false",
+      "validation": false,
+      "required": true,
+      "hidden": false,
+      "field-type": "BOOLEAN"
+    },
+    {
+      "display-name": "Type exactly: WIPE (2nd confirmation)",
+      "param-name": "cleanup_wipe_confirm",
+      "default-value": "",
+      "validation": false,
+      "required": false,
+      "hidden": false,
+      "field-type": "TEXT"
+    },
+    {
+      "display-name": "Include Ozone paths + /data/* (patterns)",
+      "param-name": "cleanup_use_patterns",
+      "default-value": "true",
+      "validation": false,
+      "required": true,
+      "hidden": false,
+      "field-type": "BOOLEAN"
+    },
+    {
+      "display-name": "FSTAB Tag (managed lines)",
+      "param-name": "cleanup_fstab_tag",
+      "default-value": "ansible:ozone-managed",
+      "validation": false,
+      "required": false,
+      "hidden": false,
+      "field-type": "TEXT"
+    },
+    {
+      "display-name": "Keep /etc/fstab unchanged",
+      "param-name": "cleanup_keep_fstab",
+      "default-value": "false",
+      "validation": false,
+      "required": true,
+      "hidden": false,
+      "field-type": "BOOLEAN"
+    },
+    {
+      "display-name": "Extra devices CSV (/dev/sdb,/dev/sdc,...)",
+      "param-name": "cleanup_extra_devices",
+      "default-value": "",
+      "validation": false,
+      "required": false,
+      "hidden": false,
+      "field-type": "TEXT"
+    },
+    {
+      "display-name": "Dry run (preview only)",
+      "param-name": "cleanup_dry_run",
+      "default-value": "false",
+      "validation": false,
+      "required": true,
+      "hidden": false,
+      "field-type": "BOOLEAN"
+    }
+  ]
+}
+
+How the double-confirmation works in Starfleet
+
+Set Allow Disk Wipe? = true
+
+In Type exactly: WIPE (2nd confirmation) enter WIPE
+If both aren’t supplied, the playbook will exit safely before any wipe.
+
+2) Small updates so the playbook/role consume these UI params
+
+Add this default to your vars file (vars/ozone_cleanup.yml):
+
+cleanup_dry_run: false
+
+
+Then tweak the role task that composes script args to include --dry-run when requested:
+
+- name: Compose script arguments
+  set_fact:
+    _cleanup_args: >-
+      {{ '--patterns' if cleanup_use_patterns else '' }}
+      {{ '--tag ' ~ cleanup_fstab_tag if cleanup_fstab_tag|length > 0 else '' }}
+      {{ '--extra-devices ' ~ cleanup_extra_devices if cleanup_extra_devices|length > 0 else '' }}
+      {{ '--keep-fstab' if cleanup_keep_fstab else '' }}
+      {{ '--dry-run' if cleanup_dry_run | bool else '' }}
+
+
+Everything else you already have (gdisk/mailx install, /data handling, report email, post-checks) stays the same.
+
+3) What the operator will see in the portal
+
+Playbook: Ozone Filesystem Cleanup (all host types)
+
+Inputs: Server Names (Starfleet default), plus the 8 fields above.
+
+Preflight/Execute:
+
+If Dry run = true → only discovery & email report.
+
+If Allow Disk Wipe? = true and confirmation is WIPE → destructive wipe runs (with your safeguards).
+
+The operator receives an email containing: command used, return code, tail of the script log, and the validations (mount grep, /etc/fstab check, lsblk -f, loop devices, pvs).
+
+If you want me to also produce a second metadata entry for a “Dry-Run Only” variant (nice for auditors), say the word and I’ll provide that snippet too.
