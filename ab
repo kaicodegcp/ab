@@ -1,2 +1,7 @@
 DEVLIST="/dev/sdb,/dev/sdc,/dev/sdd,/dev/sde,/dev/sdf,/dev/sdg,/dev/sdh,/dev/sdi,/dev/sdj,/dev/sdk,/dev/sdl,/dev/sdm"
 sudo ./cleanup.sh --extra-devices "$DEVLIST" --really-wipe --yes-i-am-sure --keep-fstab
+
+mount | grep '^/data/'            # no output
+grep -E '\s/data/' /etc/fstab     # no output
+lsblk -f | egrep '^sd[b-m]'       # FSTYPE should be blank on wiped disks
+
