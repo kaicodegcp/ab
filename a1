@@ -1,0 +1,40 @@
+Automated Ozone Host Filesystem Cleanup via Ansible for EAP Hardware Transition
+
+Submitted for Week Ending
+
+8/8/2025
+
+Description
+
+Accelerating Ozone Hardware Refresh through Automation:
+The EAP Strategic Solutions team designed and deployed an Ansible-based automation (cti_rhel_eapbigdata_bdeng_vm_maintenance_ozone_cleanup.yml) to streamline and secure the cleanup of Ozone host filesystems. This cleanup is required when onboarding new hosts or repurposing existing physical servers as part of ongoing hardware refresh efforts.
+
+Historically, this activity required manual intervention by the Unix SA team, often taking weeks to complete. With this new automation, host cleanup and preparation are now repeatable, consistent, and validated through dry-run testing prior to actual disk wipes—dramatically reducing turnaround time and human error risk.
+
+Key Achievements:
+
+Developed an Ansible role ozone_cleanup to handle filesystem cleanup across all host types.
+
+Integrated Starfleet execution flow with user parameters like wipe confirmation, /data mount tagging, and dry-run simulation.
+
+Delivered a safe preview (dry run) mechanism that reports targeted wipe actions before actual cleanup.
+
+Successfully deployed the automation in DEV region and validated across test scenarios.
+
+Benefits to the Team:
+
+Reduces dependency on Unix SA team by enabling EAP-led automation of host cleanup.
+
+Enhances turnaround time from weeks to minutes with on-demand execution.
+
+Provides audit-friendly and safe validation via dry-run mode.
+
+Prepares infrastructure faster for Ozone DataNode onboarding during hardware lifecycle events.
+
+Next Steps:
+
+Promote the playbook to UAT/PROD regions post final testing validation.
+
+Extend automation to integrate mount creation and tagging (ansible:ozone-managed) for end-to-end readiness.
+
+Onboard this playbook into broader VM provisioning workflows for Ozone-related clusters.
